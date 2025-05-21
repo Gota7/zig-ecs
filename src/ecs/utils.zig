@@ -125,6 +125,7 @@ pub fn hashStringFnv(comptime ReturnType: type, comptime str: []const u8) Return
 
     const prime = if (ReturnType == u32) @as(u32, 16777619) else @as(u64, 1099511628211);
     var value = if (ReturnType == u32) @as(u32, 2166136261) else @as(u64, 14695981039346656037);
+    @setEvalBranchQuota(10000);
     for (str) |c| {
         value = (value ^ @as(u32, @intCast(c))) *% prime;
     }
