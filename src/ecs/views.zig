@@ -94,7 +94,8 @@ pub fn MultiView(comptime _includes: anytype, comptime _excludes: anytype) type 
 
             pub fn init(view: *Self) Iterator {
                 const ptr = view.registry.components.get(view.order[0]).?;
-                const internal_it = @as(*Storage(u8), @ptrFromInt(ptr)).set.reverseIterator();
+                const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                const internal_it = storage.set.reverseIterator();
                 return .{ .view = view, .internal_it = internal_it };
             }
 
@@ -103,7 +104,8 @@ pub fn MultiView(comptime _includes: anytype, comptime _excludes: anytype) type 
                     // entity must be in all other Storages
                     for (it.view.order) |tid| {
                         const ptr = it.view.registry.components.get(tid).?;
-                        if (!@as(*Storage(u1), @ptrFromInt(ptr)).contains(entity)) {
+                        const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                        if (!storage.contains(entity)) {
                             break :blk;
                         }
                     }
@@ -111,7 +113,8 @@ pub fn MultiView(comptime _includes: anytype, comptime _excludes: anytype) type 
                     // entity must not be in all other excluded Storages
                     inline for (exclude_type_ids) |tid| {
                         const ptr = it.view.registry.components.get(tid).?;
-                        if (@as(*Storage(u1), @ptrFromInt(ptr)).contains(entity)) {
+                        const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                        if (storage.contains(entity)) {
                             break :blk;
                         }
                     }
@@ -130,7 +133,8 @@ pub fn MultiView(comptime _includes: anytype, comptime _excludes: anytype) type 
 
             fn getInternalIteratorInstance(it: *Iterator) ReverseSliceIterator(Entity) {
                 const ptr = it.view.registry.components.get(it.view.order[0]).?;
-                return @as(*Storage(u8), @ptrFromInt(ptr)).set.reverseIterator();
+                const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                return storage.set.reverseIterator();
             }
         };
 
@@ -154,13 +158,34 @@ pub fn MultiView(comptime _includes: anytype, comptime _excludes: anytype) type 
             return self.registry.assure(T).getConst(entity);
         }
 
+        pub fn contains(self: *Self, entity: Entity) bool {
+            // entity must be in all other Storages
+            inline for (include_type_ids) |tid| {
+                const ptr = self.registry.components.get(tid).?;
+                const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                if (!storage.contains(entity)) {
+                    return false;
+                }
+            }
+
+            // entity must not be in all other excluded Storages
+            inline for (exclude_type_ids) |tid| {
+                const ptr = self.registry.components.get(tid).?;
+                const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                if (storage.contains(entity)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         fn sort(self: *Self) void {
             // get our component counts in an array so we can sort the type_ids based on how many entities are in each
             var sub_items: [_includes.len]usize = undefined;
             for (include_type_ids, 0..) |tid, i| {
                 const ptr = self.registry.components.get(tid).?;
-                const store = @as(*Storage(u8), @ptrFromInt(ptr));
-                sub_items[i] = store.len();
+                const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                sub_items[i] = storage.len();
             }
 
             const asc_usize = struct {
@@ -254,14 +279,14 @@ test "single basic view" {
     var store = Storage(f32).init(std.testing.allocator);
     defer store.deinit();
 
-    store.add(3, 30);
-    store.add(5, 50);
-    store.add(7, 70);
+    store.add(.{ .index = 3, .version = 0 }, 30);
+    store.add(.{ .index = 5, .version = 0 }, 50);
+    store.add(.{ .index = 7, .version = 0 }, 70);
 
     var view = BasicView(f32).init(&store);
     try std.testing.expectEqual(view.len(), 3);
 
-    store.remove(7);
+    store.remove(.{ .index = 7, .version = 0 });
     try std.testing.expectEqual(view.len(), 2);
 
     var i: usize = 0;
@@ -276,11 +301,11 @@ test "single basic view" {
     var entIter = view.entityIterator();
     while (entIter.next()) |ent| {
         if (i == 0) {
-            try std.testing.expectEqual(ent, 5);
+            try std.testing.expectEqual(@as(Entity, .{ .index = 5, .version = 0 }), ent);
             try std.testing.expectEqual(view.getConst(ent), 50);
         }
         if (i == 1) {
-            try std.testing.expectEqual(ent, 3);
+            try std.testing.expectEqual(ent, @as(Entity, .{ .index = 3, .version = 0 }));
             try std.testing.expectEqual(view.getConst(ent), 30);
         }
         i += 1;
@@ -291,21 +316,21 @@ test "single basic view data" {
     var store = Storage(f32).init(std.testing.allocator);
     defer store.deinit();
 
-    store.add(3, 30);
-    store.add(5, 50);
-    store.add(7, 70);
+    store.add(.{ .index = 3, .version = 0 }, 30);
+    store.add(.{ .index = 5, .version = 0 }, 50);
+    store.add(.{ .index = 7, .version = 0 }, 70);
 
     var view = BasicView(f32).init(&store);
 
-    try std.testing.expectEqual(view.get(3).*, 30);
+    try std.testing.expectEqual(view.get(.{ .index = 3, .version = 0 }).*, 30);
 
     for (view.data(), 0..) |entity, i| {
         if (i == 0)
-            try std.testing.expectEqual(entity, 3);
+            try std.testing.expectEqual(entity, @as(Entity, .{ .index = 3, .version = 0 }));
         if (i == 1)
-            try std.testing.expectEqual(entity, 5);
+            try std.testing.expectEqual(entity, @as(Entity, .{ .index = 5, .version = 0 }));
         if (i == 2)
-            try std.testing.expectEqual(entity, 7);
+            try std.testing.expectEqual(entity, @as(Entity, .{ .index = 7, .version = 0 }));
     }
 
     for (view.raw(), 0..) |data, i| {
@@ -652,6 +677,51 @@ test "exclude type from view" {
 
     var view1 = reg.view(.{ f32, i32 }, .{});
     var view2 = view1.exclude(u8);
+
+    var iterated_entities: usize = 0;
+    var iter = view2.entityIterator();
+    while (iter.next()) |_| {
+        iterated_entities += 1;
+    }
+
+    try std.testing.expectEqual(iterated_entities, 1);
+    iterated_entities = 0;
+
+    reg.remove(u8, e2);
+
+    iter.reset();
+    while (iter.next()) |_| {
+        iterated_entities += 1;
+    }
+
+    try std.testing.expectEqual(iterated_entities, 2);
+}
+
+test "check if entity belongs to view without iterating over everything" {
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const e0 = reg.create();
+    const e1 = reg.create();
+    const e2 = reg.create();
+    const e4 = reg.create();
+
+    reg.add(e0, @as(i32, 0));
+    reg.add(e1, @as(i32, -1));
+    reg.add(e2, @as(i32, -2));
+    reg.add(e4, @as(i32, -3));
+
+    reg.add(e0, @as(f32, 0.0));
+    reg.add(e2, @as(f32, 2.0));
+
+    reg.add(e2, @as(u8, 255));
+
+    var view1 = reg.view(.{ f32, i32 }, .{});
+    try std.testing.expect(view1.contains(e2));
+    try std.testing.expect(view1.contains(e2));
+    try std.testing.expect(!view1.contains(e4));
+    var view2 = view1.exclude(u8);
+    try std.testing.expect(!view2.contains(e2));
 
     var iterated_entities: usize = 0;
     var iter = view2.entityIterator();

@@ -11,11 +11,10 @@ const TypeStore = @import("type_store.zig").TypeStore;
 
 // allow overriding EntityTraits by setting in root via: EntityTraits = EntityTraitsType(.medium);
 const root = @import("root");
-pub const entity_traits = if (@hasDecl(root, "EntityTraits")) root.EntityTraits.init() else @import("entity.zig").EntityTraits.init();
+pub const Entity = if (@hasDecl(root, "Entity")) root.Entity else @import("entity.zig").DefaultEntity;
 
 // setup the Handles type based on the type set in EntityTraits
-pub const EntityHandles = Handles(entity_traits.entity_type, entity_traits.index_type, entity_traits.version_type);
-pub const Entity = entity_traits.entity_type;
+pub const EntityHandles = Handles(Entity);
 
 const BasicView = @import("views.zig").BasicView;
 const MultiView = @import("views.zig").MultiView;
@@ -31,8 +30,8 @@ pub fn Storage(comptime CompT: type) type {
 /// no errors to keep the API clean and because if a component array cant be allocated you've got bigger problems.
 pub const Registry = struct {
     handles: EntityHandles,
-    components: std.AutoHashMapUnmanaged(u32, usize),
-    contexts: std.AutoHashMapUnmanaged(u32, usize),
+    components: std.AutoHashMapUnmanaged(u32, *anyopaque),
+    contexts: std.AutoHashMapUnmanaged(u32, *anyopaque),
     groups: std.ArrayListUnmanaged(*GroupData),
     type_store: TypeStore,
     allocator: std.mem.Allocator,
@@ -54,7 +53,7 @@ pub const Registry = struct {
             // std.debug.assert(std.mem.indexOfAny(u32, include, exclude) == null);
             var group_data = allocator.create(GroupData) catch unreachable;
             group_data.hash = hash;
-            group_data.size = @as(u8, @intCast(owned.len + include.len + exclude.len));
+            group_data.size = @intCast(owned.len + include.len + exclude.len);
             if (owned.len == 0) {
                 group_data.entity_set = SparseSet(Entity).init(allocator);
             }
@@ -77,64 +76,68 @@ pub const Registry = struct {
             allocator.destroy(self);
         }
 
+        /// On entity component update, adds the entity to our lists if it is valid
         pub fn maybeValidIf(self: *GroupData, registry: *Registry, entity: Entity) void {
             const isValid: bool = blk: {
                 for (self.owned) |tid| {
-                    const ptr = registry.components.get(tid).?;
-                    if (!@as(*Storage(u1), @ptrFromInt(ptr)).contains(entity))
+                    const storage_ptr = registry.components.get(tid).?;
+                    const storage: *Storage(u1) = @alignCast(@ptrCast(storage_ptr));
+                    if (!storage.contains(entity))
                         break :blk false;
                 }
 
                 for (self.include) |tid| {
-                    const ptr = registry.components.get(tid).?;
-                    if (!@as(*Storage(u1), @ptrFromInt(ptr)).contains(entity))
+                    const storage_ptr = registry.components.get(tid).?;
+                    const storage: *Storage(u1) = @alignCast(@ptrCast(storage_ptr));
+                    if (!storage.contains(entity))
                         break :blk false;
                 }
 
                 for (self.exclude) |tid| {
                     const ptr = registry.components.get(tid).?;
-                    if (@as(*Storage(u1), @ptrFromInt(ptr)).contains(entity))
+                    const storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+                    if (storage.contains(entity))
                         break :blk false;
                 }
                 break :blk true;
             };
 
+            if (!isValid) return;
+
+            // If this is not an owning group, just add the entity to our set of tracked entities
             if (self.owned.len == 0) {
-                if (isValid and !self.entity_set.contains(entity)) {
-                    self.entity_set.add(entity);
-                }
-            } else {
-                if (isValid) {
-                    const ptr = registry.components.get(self.owned[0]).?;
-                    if (!(@as(*Storage(u1), @ptrFromInt(ptr)).set.index(entity) < self.current)) {
-                        for (self.owned) |tid| {
-                            // store.swap hides a safe version that types it correctly
-                            const store_ptr = registry.components.get(tid).?;
-                            var store = @as(*Storage(u1), @ptrFromInt(store_ptr));
-                            store.swap(store.data()[self.current], entity);
-                        }
-                        self.current += 1;
-                    }
-                }
-                std.debug.assert(self.owned.len >= 0);
+                if (!self.entity_set.contains(entity)) self.entity_set.add(entity);
+                return;
             }
+
+            const first_owned_ptr = registry.components.get(self.owned[0]).?;
+            const first_owned: *Storage(u1) = @alignCast(@ptrCast(first_owned_ptr));
+            if (first_owned.set.index(entity) < self.current) return;
+
+            for (self.owned) |owned_type| {
+                // store.swap hides a safe version that types it correctly
+                const storage_ptr = registry.components.get(owned_type).?;
+                var storage: *Storage(u1) = @alignCast(@ptrCast(storage_ptr));
+                storage.swap(storage.data()[self.current], entity);
+            }
+            std.debug.assert(self.owned.len >= 0);
+            self.current += 1;
         }
 
         pub fn discardIf(self: *GroupData, registry: *Registry, entity: Entity) void {
             if (self.owned.len == 0) {
-                if (self.entity_set.contains(entity)) {
-                    self.entity_set.remove(entity);
-                }
-            } else {
-                const ptr = registry.components.get(self.owned[0]).?;
-                var store = @as(*Storage(u1), @ptrFromInt(ptr));
-                if (store.contains(entity) and store.set.index(entity) < self.current) {
-                    self.current -= 1;
-                    for (self.owned) |tid| {
-                        const store_ptr = registry.components.get(tid).?;
-                        store = @as(*Storage(u1), @ptrFromInt(store_ptr));
-                        store.swap(store.data()[self.current], entity);
-                    }
+                if (self.entity_set.contains(entity)) self.entity_set.remove(entity);
+                return;
+            }
+
+            const ptr = registry.components.get(self.owned[0]).?;
+            var storage: *Storage(u1) = @alignCast(@ptrCast(ptr));
+            if (storage.contains(entity) and storage.set.index(entity) < self.current) {
+                self.current -= 1;
+                for (self.owned) |tid| {
+                    const store_ptr = registry.components.get(tid).?;
+                    storage = @alignCast(@ptrCast(store_ptr));
+                    storage.swap(storage.data()[self.current], entity);
                 }
             }
         }
@@ -185,8 +188,8 @@ pub const Registry = struct {
     pub fn init(allocator: std.mem.Allocator) Registry {
         return Registry{
             .handles = EntityHandles.init(allocator),
-            .components = std.AutoHashMapUnmanaged(u32, usize){},
-            .contexts = std.AutoHashMapUnmanaged(u32, usize){},
+            .components = .empty,
+            .contexts = .empty,
             .groups = std.ArrayListUnmanaged(*GroupData){},
             .type_store = TypeStore.init(allocator),
             .allocator = allocator,
@@ -197,7 +200,7 @@ pub const Registry = struct {
         var iter = self.components.valueIterator();
         while (iter.next()) |ptr| {
             // HACK: we dont know the Type here but we need to call deinit
-            var storage = @as(*Storage(u1), @ptrFromInt(ptr.*));
+            var storage: *Storage(u1) = @alignCast(@ptrCast(ptr.*));
             storage.destroy();
         }
 
@@ -219,13 +222,12 @@ pub const Registry = struct {
 
         const type_id = comptime utils.typeId(T);
         if (self.components.getEntry(type_id)) |kv| {
-            return @as(*Storage(T), @ptrFromInt(kv.value_ptr.*));
+            return @alignCast(@ptrCast(kv.value_ptr.*));
         }
 
         const comp_set = Storage(T).create(self.allocator);
         comp_set.registry = self;
-        const comp_set_ptr = @intFromPtr(comp_set);
-        _ = self.components.put(self.allocator, type_id, comp_set_ptr) catch unreachable;
+        _ = self.components.put(self.allocator, type_id, @ptrCast(comp_set)) catch unreachable;
         return comp_set;
     }
 
@@ -245,32 +247,22 @@ pub const Registry = struct {
     }
 
     /// Direct access to the list of components of a given pool
-    pub fn raw(self: Registry, comptime T: type) []T {
+    pub fn raw(self: *Registry, comptime T: type) []T {
         return self.assure(T).raw();
     }
 
     /// Direct access to the list of entities of a given pool
-    pub fn data(self: Registry, comptime T: type) []Entity {
-        return self.assure(T).data().*;
+    pub fn data(self: *Registry, comptime T: type) []Entity {
+        return self.assure(T).dataPtr().*;
     }
 
     pub fn valid(self: *Registry, entity: Entity) bool {
         return self.handles.alive(entity);
     }
 
-    /// Returns the entity identifier without the version
-    pub fn entityId(_: Registry, entity: Entity) Entity {
-        return entity & entity_traits.entity_mask;
-    }
-
-    /// Returns the version stored along with an entity identifier
-    pub fn version(_: *Registry, entity: Entity) entity_traits.version_type {
-        return @as(entity_traits.version_type, @truncate(entity >> entity_traits.entity_shift));
-    }
-
     /// Creates a new entity and returns it
     pub fn create(self: *Registry) Entity {
-        return self.handles.create();
+        return self.handles.create() catch unreachable;
     }
 
     /// Destroys an entity
@@ -429,8 +421,8 @@ pub const Registry = struct {
         var iter = self.components.valueIterator();
         while (iter.next()) |value| {
             // HACK: we dont know the Type here but we need to be able to call methods on the Storage(T)
-            var store = @as(*Storage(u1), @ptrFromInt(value.*));
-            store.removeIfContains(entity);
+            var storage: *Storage(u1) = @alignCast(@ptrCast(value.*));
+            storage.removeIfContains(entity);
         }
     }
 
@@ -491,23 +483,20 @@ pub const Registry = struct {
         std.debug.assert(@typeInfo(@TypeOf(context)) == .pointer);
 
         const type_id = utils.typeId(@typeInfo(@TypeOf(context)).pointer.child);
-        _ = self.contexts.put(self.allocator, type_id, @intFromPtr(context)) catch unreachable;
+        _ = self.contexts.put(self.allocator, type_id, @ptrCast(context)) catch unreachable;
     }
 
     /// Unsets a context variable if it exists
     pub fn unsetContext(self: *Registry, comptime T: type) void {
         std.debug.assert(@typeInfo(T) != .pointer);
-        _ = self.contexts.put(self.allocator, utils.typeId(T), 0) catch unreachable;
+        _ = self.contexts.remove(utils.typeId(T));
     }
 
     /// Returns a pointer to an object in the context of the registry
     pub fn getContext(self: *Registry, comptime T: type) ?*T {
         std.debug.assert(@typeInfo(T) != .pointer);
 
-        return if (self.contexts.get(utils.typeId(T))) |ptr|
-            return if (ptr > 0) @as(*T, @ptrFromInt(ptr)) else null
-        else
-            null;
+        return @alignCast(@ptrCast(self.contexts.get(utils.typeId(T))));
     }
 
     /// provides access to a TypeStore letting you add singleton components to the registry

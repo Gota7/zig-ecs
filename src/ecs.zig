@@ -1,6 +1,5 @@
 // ecs
-pub const EntityTraitsType = @import("ecs/entity.zig").EntityTraitsType;
-
+pub const EntityClass = @import("ecs/entity.zig").EntityClass;
 pub const Entity = @import("ecs/registry.zig").Entity;
 pub const Registry = @import("ecs/registry.zig").Registry;
 pub const EntityHandles = @import("ecs/registry.zig").EntityHandles;
@@ -10,6 +9,7 @@ pub const BasicGroup = @import("ecs/groups.zig").BasicGroup;
 pub const OwningGroup = @import("ecs/groups.zig").OwningGroup;
 pub const SparseSet = @import("ecs/sparse_set.zig").SparseSet;
 pub const utils = @import("ecs/utils.zig");
+pub const Handles = @import("ecs/handles.zig").Handles;
 
 // signals
 pub const Signal = @import("signals/signal.zig").Signal;
